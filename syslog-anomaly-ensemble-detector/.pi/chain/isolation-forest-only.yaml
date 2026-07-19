@@ -1,0 +1,98 @@
+# =============================================================================
+# Chain: Isolation Forest Only
+# Mo ta: Pipeline phat hien bat thuong don mo hinh, chi su dung Isolation Forest.
+#
+# Luong xu ly:
+#   Parser → Embedding → Isolation Forest → Reporter
+#
+# Phu hop khi:
+#   - Can phat hien global outlier (diem nam vung thua thot)
+#   - Muon thu nghiem detector dua tren cay ngau nhien
+#   - Khong muon uoc luong nguong thu cong (Isolation Forest tu dong)
+# =============================================================================
+
+chain:
+  name: "isolation-forest-only"
+  version: "1.0"
+  description: >
+    Pipeline don mo hinh su dung Isolation Forest (sklearn). Xay dung 100 cay
+    ngau nhien, diem nao de bi co lap (it lan phan nhanh) se bi gan co bat
+    thuong. Contamination=0.05 → ky vong 5% bat thuong. Ground truth chi
+    dung de danh gia.
+
+  # ---------------------------------------------------------------------------
+  # Cau hinh toan cuc
+  # ---------------------------------------------------------------------------
+  config:
+    contamination: 0.05         # Ty le anomaly uoc tinh
+    n_estimators: 100           # So cay trong rung
+    random_state: 42            # Seed co dinh
+    default_year: 2026
+    model_name: "all-MiniLM-L6-v2"
+    batch_size: 64
+
+  # ---------------------------------------------------------------------------
+  # Cac agent tham gia
+  # ---------------------------------------------------------------------------
+  agents:
+    - parser-agent
+    - embedding-agent
+    - isolation-forest-agent   # Phat hien bat thuong bang Isolation Forest
+    - reporter-agent           # Sinh bao cao Evaluation Report
+
+  # ---------------------------------------------------------------------------
+  # Cac buoc thuc thi (tuan tu)
+  # ---------------------------------------------------------------------------
+  steps:
+    # Buoc 1: Parse syslog tho
+    - agent: parser-agent
+      skill: syslog-parser
+      input:
+        log_file: "data/raw/syslog_synthetic.log"
+        default_year: 2026
+      output:
+        parsed_logs: "data/processed/parsed_logs.json"
+
+    # Buoc 2: Vector hoa message
+    - agent: embedding-agent
+      skill: embedding-generator
+      input:
+        parsed_logs: "data/processed/parsed_logs.json"
+        model_name: "all-MiniLM-L6-v2"
+        batch_size: 64
+      output:
+        embeddings: "data/processed/embeddings.npy"
+        metadata: "data/processed/embeddings_meta.json"
+
+    # Buoc 3: Phat hien bat thuong bang Isolation Forest
+    - agent: isolation-forest-agent
+      skill: isolation-forest-detector
+      input:
+        embeddings: "data/processed/embeddings.npy"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+        contamination: 0.05
+        n_estimators: 100
+        random_state: 42
+      output:
+        results: "data/processed/isolation_forest_results.json"
+
+    # Buoc 4: Sinh bao cao
+    - agent: reporter-agent
+      skill: anomaly-reporter
+      input:
+        isolation_forest_results: "data/processed/isolation_forest_results.json"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+      output:
+        report: "reports/isolation_forest_report.md"
+
+  # ---------------------------------------------------------------------------
+  # Ket qua mong doi
+  # ---------------------------------------------------------------------------
+  expected_results:
+    accuracy: "~0.89 - 0.93"
+    precision: "~0.65 - 0.85"
+    recall: "~0.30 - 0.45"
+    f1_score: "~0.45 - 0.60"
+    anomalies_detected: "~250 / 5000"

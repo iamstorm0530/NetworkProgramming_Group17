@@ -1,0 +1,192 @@
+# =============================================================================
+# Chain: Ensemble Parallel (3 Detectors)
+# Mo ta: Pipeline tong hop, chay song song 3 detector, sau do ensemble.
+#
+# Luong xu ly:
+#   Parser → Embedding ─┬── Centroid        ──┐
+#                        ├── KNN             ──┤
+#                        └── Isolation Forest ──┘
+#                                                ├── Ensemble → Reporter
+#
+# Diem manh:
+#   - 3 detector chay SONG SONG (parallel) → tan dung da nhan CPU
+#   - Ensemble bo sung diem manh cua ca 3 detector
+#   - 4 chien luoc ensemble de lua chon
+# =============================================================================
+
+chain:
+  name: "ensemble-parallel"
+  version: "2.0"
+  description: >
+    Pipeline toan dien nhat voi 3 detector. Centroid, KNN, va Isolation Forest
+    chay song song (parallel) tren cung mot tap embedding. Ket qua duoc
+    ensemble-voter ket hop bang 4 chien luoc: weighted_average, majority_and,
+    majority_2of3, majority_or. Ground truth chi dung de danh gia cuoi cung.
+
+  # ---------------------------------------------------------------------------
+  # Cau hinh toan cuc
+  # ---------------------------------------------------------------------------
+  config:
+    # Centroid
+    centroid_threshold_sigma: 2.0
+
+    # KNN
+    knn_k_neighbors: 5
+    knn_threshold_sigma: 2.0
+
+    # Isolation Forest
+    iforest_contamination: 0.05
+    iforest_n_estimators: 100
+    iforest_random_state: 42
+
+    # Ensemble
+    weight_centroid: 1.0
+    weight_knn: 1.0
+    weight_iforest: 1.0
+    weighted_threshold: 0.5
+    active_strategy: "majority_or"
+
+    # Chung
+    default_year: 2026
+    model_name: "all-MiniLM-L6-v2"
+    batch_size: 64
+
+  # ---------------------------------------------------------------------------
+  # Cac agent tham gia
+  # ---------------------------------------------------------------------------
+  agents:
+    - parser-agent
+    - embedding-agent
+    - centroid-agent          # Chay song song ─┐
+    - knn-agent               # Chay song song ─┤
+    - isolation-forest-agent  # Chay song song ─┘
+    - ensemble-agent          # Ket hop ket qua
+    - reporter-agent          # Sinh bao cao
+
+  # ---------------------------------------------------------------------------
+  # Cac buoc thuc thi
+  # ---------------------------------------------------------------------------
+  steps:
+    # =====================================================================
+    # Giai doan 1: Tien xu ly (tuan tu)
+    # =====================================================================
+    - agent: parser-agent
+      skill: syslog-parser
+      input:
+        log_file: "data/raw/syslog_synthetic.log"
+        default_year: 2026
+      output:
+        parsed_logs: "data/processed/parsed_logs.json"
+
+    - agent: embedding-agent
+      skill: embedding-generator
+      input:
+        parsed_logs: "data/processed/parsed_logs.json"
+        model_name: "all-MiniLM-L6-v2"
+        batch_size: 64
+      output:
+        embeddings: "data/processed/embeddings.npy"
+        metadata: "data/processed/embeddings_meta.json"
+
+    # =====================================================================
+    # Giai doan 2: Phat hien bat thuong (SONG SONG — 3 detector)
+    # =====================================================================
+    - parallel:
+        # Nhanh A: Centroid Detector
+        - agent: centroid-agent
+          skill: centroid-detector
+          input:
+            embeddings: "data/processed/embeddings.npy"
+            parsed_logs: "data/processed/parsed_logs.json"
+            ground_truth: "data/raw/syslog_ground_truth.json"
+            threshold_sigma: 2.0
+          output:
+            results: "logs/centroid_results.json"
+
+        # Nhanh B: KNN Detector
+        - agent: knn-agent
+          skill: knn-detector
+          input:
+            embeddings: "data/processed/embeddings.npy"
+            parsed_logs: "data/processed/parsed_logs.json"
+            ground_truth: "data/raw/syslog_ground_truth.json"
+            k_neighbors: 5
+            threshold_sigma: 2.0
+          output:
+            results: "logs/knn_results.json"
+
+        # Nhanh C: Isolation Forest Detector
+        - agent: isolation-forest-agent
+          skill: isolation-forest-detector
+          input:
+            embeddings: "data/processed/embeddings.npy"
+            parsed_logs: "data/processed/parsed_logs.json"
+            ground_truth: "data/raw/syslog_ground_truth.json"
+            contamination: 0.05
+            n_estimators: 100
+            random_state: 42
+          output:
+            results: "data/processed/isolation_forest_results.json"
+
+    # =====================================================================
+    # Giai doan 3: Ket hop & bao cao (tuan tu)
+    # =====================================================================
+    - agent: ensemble-agent
+      skill: ensemble-voter
+      input:
+        centroid_results: "logs/centroid_results.json"
+        knn_results: "logs/knn_results.json"
+        iforest_results: "data/processed/isolation_forest_results.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+        weight_centroid: 1.0
+        weight_knn: 1.0
+        weight_iforest: 1.0
+        weighted_threshold: 0.5
+      output:
+        results: "logs/ensemble_results.json"
+
+    - agent: reporter-agent
+      skill: anomaly-reporter
+      input:
+        centroid_results: "logs/centroid_results.json"
+        knn_results: "logs/knn_results.json"
+        iforest_results: "data/processed/isolation_forest_results.json"
+        ensemble_results: "logs/ensemble_results.json"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+      output:
+        reports:
+          - "reports/centroid_report.md"
+          - "reports/knn_report.md"
+          - "reports/isolation_forest_report.md"
+          - "reports/ensemble_report.md"
+
+  # ---------------------------------------------------------------------------
+  # So sanh ket qua 4 chien luoc
+  # ---------------------------------------------------------------------------
+  strategy_comparison:
+    weighted_average:
+      description: "Trung binh co trong so anomaly score tu 3 detector"
+      use_case: "Can 1 score lien tuc, co the tinh chinh nguong"
+    majority_and:
+      description: "Ca 3 detector cung gan co → bat thuong"
+      use_case: "Can precision tuyet doi, 0 false positive"
+    majority_2of3:
+      description: "It nhat 2/3 detector gan co → bat thuong"
+      use_case: "Can bang tot giua precision va recall"
+    majority_or:
+      description: "It nhat 1/3 detector gan co → bat thuong"
+      use_case: "Can recall cao nhat, phat hien toi da"
+
+  # ---------------------------------------------------------------------------
+  # Ket qua mong doi voi majority_or
+  # ---------------------------------------------------------------------------
+  expected_results:
+    accuracy: "~0.85"
+    precision: "~0.75"
+    recall: "~0.38"
+    f1_score: "~0.50"
+    anomalies_detected: "~370 / 5000"
+    improvement: >
+      Ensemble 3 detector cai thien dang ke recall so voi tung detector don le.
+      Precision van duy tri o muc chap nhan duoc.

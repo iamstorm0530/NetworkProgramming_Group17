@@ -1,0 +1,93 @@
+# =============================================================================
+# Chain: Centroid Only
+# Mô tả: Pipeline phát hiện bất thường đơn mô hình, chỉ sử dụng Centroid Detector.
+#
+# Luồng xử lý:
+#   Parser → Embedding → Centroid → Reporter
+#
+# Phù hợp khi:
+#   - Cần Precision tuyệt đối (100%, 0 false positive)
+#   - Muốn phát hiện anomaly lệch khỏi hành vi chuẩn của service
+#   - Hệ thống đơn giản, nhanh, dễ giải thích
+# =============================================================================
+
+chain:
+  name: "centroid-only"
+  version: "1.0"
+  description: >
+    Pipeline đơn mô hình sử dụng Centroid Detector. Mỗi service có một vector
+    trung tâm riêng. Dòng log nào có cosine distance đến centroid vượt ngưỡng
+    mean + 2*std sẽ bị gắn cờ bất thường. Ground truth chỉ dùng để đánh giá.
+
+  # ---------------------------------------------------------------------------
+  # Cấu hình toàn cục
+  # ---------------------------------------------------------------------------
+  config:
+    threshold_sigma: 2.0        # Số lần độ lệch chuẩn cho ngưỡng
+    default_year: 2026           # Năm mặc định cho syslog RFC 3164
+    model_name: "all-MiniLM-L6-v2"
+    batch_size: 64
+
+  # ---------------------------------------------------------------------------
+  # Các agent tham gia
+  # ---------------------------------------------------------------------------
+  agents:
+    - parser-agent       # Đọc & parse syslog thô
+    - embedding-agent    # Vector hóa message → 384 chiều
+    - centroid-agent     # Phát hiện bất thường bằng Per-Service Centroid
+    - reporter-agent     # Sinh bao cao Evaluation Report
+
+  # ---------------------------------------------------------------------------
+  # Các bước thực thi (tuần tự)
+  # ---------------------------------------------------------------------------
+  steps:
+    # Bước 1: Parse syslog thô → JSON có cấu trúc
+    - agent: parser-agent
+      skill: syslog-parser
+      input:
+        log_file: "data/raw/syslog_synthetic.log"
+        default_year: 2026
+      output:
+        parsed_logs: "data/processed/parsed_logs.json"
+
+    # Bước 2: Vector hóa message → embeddings
+    - agent: embedding-agent
+      skill: embedding-generator
+      input:
+        parsed_logs: "data/processed/parsed_logs.json"
+        model_name: "all-MiniLM-L6-v2"
+        batch_size: 64
+      output:
+        embeddings: "data/processed/embeddings.npy"
+        metadata: "data/processed/embeddings_meta.json"
+
+    # Bước 3: Phát hiện bất thường bằng Centroid
+    - agent: centroid-agent
+      skill: centroid-detector
+      input:
+        embeddings: "data/processed/embeddings.npy"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+        threshold_sigma: 2.0
+      output:
+        results: "logs/centroid_results.json"
+
+    # Bước 4: Sinh báo cáo đánh giá
+    - agent: reporter-agent
+      skill: anomaly-reporter
+      input:
+        centroid_results: "logs/centroid_results.json"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+      output:
+        ai_report: "reports/centroid_report.md"
+
+  # ---------------------------------------------------------------------------
+  # Kết quả mong đợi
+  # ---------------------------------------------------------------------------
+  expected_results:
+    accuracy: "~0.93"
+    precision: "1.00"
+    recall: "~0.27"
+    f1_score: "~0.42"
+    anomalies_detected: "~133 / 5000"

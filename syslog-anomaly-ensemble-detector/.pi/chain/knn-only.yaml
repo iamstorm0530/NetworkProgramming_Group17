@@ -1,0 +1,100 @@
+# =============================================================================
+# Chain: KNN Only
+# Mô tả: Pipeline phát hiện bất thường đơn mô hình, chỉ sử dụng KNN Detector.
+#
+# Luồng xử lý:
+#   Parser → Embedding → KNN → Reporter
+#
+# Phù hợp khi:
+#   - Cần phát hiện các anomaly "độc nhất" (global outlier)
+#   - Muốn tìm những log hoàn toàn khác biệt với mọi log khác
+#   - Hệ thống có khả năng phát hiện zero-day attack (chưa từng thấy)
+# =============================================================================
+
+chain:
+  name: "knn-only"
+  version: "1.0"
+  description: >
+    Pipeline đơn mô hình sử dụng K-Nearest Neighbors (k=5). Với mỗi dòng log,
+    tính khoảng cách cosine trung bình đến 5 láng giềng gần nhất. Dòng nào có
+    khoảng cách vượt ngưỡng mean + 2*std (toàn cục) sẽ bị gắn cờ. Ground truth
+    chỉ dùng để đánh giá.
+
+  # ---------------------------------------------------------------------------
+  # Cấu hình toàn cục
+  # ---------------------------------------------------------------------------
+  config:
+    k_neighbors: 5              # Số láng giềng gần nhất
+    threshold_sigma: 2.0        # Số lần độ lệch chuẩn cho ngưỡng
+    default_year: 2026
+    model_name: "all-MiniLM-L6-v2"
+    batch_size: 64
+
+  # ---------------------------------------------------------------------------
+  # Các agent tham gia
+  # ---------------------------------------------------------------------------
+  agents:
+    - parser-agent
+    - embedding-agent
+    - knn-agent          # Phát hiện bất thường bằng KNN
+    - reporter-agent
+
+  # ---------------------------------------------------------------------------
+  # Các bước thực thi (tuần tự)
+  # ---------------------------------------------------------------------------
+  steps:
+    # Bước 1: Parse syslog thô → JSON có cấu trúc
+    - agent: parser-agent
+      skill: syslog-parser
+      input:
+        log_file: "data/raw/syslog_synthetic.log"
+        default_year: 2026
+      output:
+        parsed_logs: "data/processed/parsed_logs.json"
+
+    # Bước 2: Vector hóa message → embeddings
+    - agent: embedding-agent
+      skill: embedding-generator
+      input:
+        parsed_logs: "data/processed/parsed_logs.json"
+        model_name: "all-MiniLM-L6-v2"
+        batch_size: 64
+      output:
+        embeddings: "data/processed/embeddings.npy"
+        metadata: "data/processed/embeddings_meta.json"
+
+    # Bước 3: Phát hiện bất thường bằng KNN
+    - agent: knn-agent
+      skill: knn-detector
+      input:
+        embeddings: "data/processed/embeddings.npy"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+        k_neighbors: 5
+        threshold_sigma: 2.0
+      output:
+        results: "logs/knn_results.json"
+
+    # Bước 4: Sinh báo cáo đánh giá
+    - agent: reporter-agent
+      skill: anomaly-reporter
+      input:
+        knn_results: "logs/knn_results.json"
+        parsed_logs: "data/processed/parsed_logs.json"
+        ground_truth: "data/raw/syslog_ground_truth.json"
+      output:
+        ai_report: "reports/knn_report.md"
+
+  # ---------------------------------------------------------------------------
+  # Kết quả mong đợi
+  # ---------------------------------------------------------------------------
+  expected_results:
+    accuracy: "~0.90"
+    precision: "1.00"
+    recall: "~0.02"
+    f1_score: "~0.04"
+    anomalies_detected: "~10 / 5000"
+    note: >
+      KNN rất bảo thủ, chỉ bắt được các anomaly cực kỳ độc đáo
+      (vd: kernel crash, invalid user hiếm). Phù hợp làm detector
+      bổ sung trong ensemble.
